@@ -6,7 +6,7 @@ from the [README](README.md#your-task).
 | Stage | State |
 |---|---|
 | 1. Clean `hubs-global.csv` | done |
-| 2. REST services | not started |
+| 2. REST services | done |
 | 3. `package-status-topic` | not started |
 | 4. AlertBot | not started |
 
@@ -81,3 +81,97 @@ lists it under `ignoredColumns`, and the service logs a warning at startup.
 the real file end to end (18 rows, 10 hubs, nothing rejected), and both endpoints over HTTP.
 The jar was also run and queried with `curl`; its output matched a by-hand reading of the 18
 rows.
+
+## Stage 2: the REST services
+
+```
+ingestion-service ◀── GET /hubs ── hub-service ◀── GET /hubs/{id} ── transit-service ──▶ GET /eta/{hubId}
+     (7050)                          (7051)       ◀── GET /hubs/{id} ──┐      (7053)
+                                                                       │        │ GET /delay-stage/{id}
+                                     POST /delay-stage/{hubId} ──▶ delay-stage-service (7052)
+```
+
+Start the four services (each from its own folder, `java -jar target/<module>.jar`, in any
+order), then:
+
+```
+curl localhost:7051/hubs/H-510                                  # an alias: answers with H-500
+curl localhost:7051/provinces
+curl -X POST localhost:7052/delay-stage/H-506 -d '{"stage": 5}'  # H-506 is Durban: stored as H-503
+curl localhost:7053/eta/H-503                                   # DELAYED, stage 5, 84-168h
+```
+
+| Service | Endpoint | Notes |
+|---|---|---|
+| hub-service | `GET /hubs`, `GET /hubs/{hubId}`, `GET /provinces` | by ID or alias; 404 unknown; 503 if ingestion-service is down |
+| delay-stage-service | `POST /delay-stage/{hubId}`, `GET /delay-stage/{hubId}`, `GET /delay-stage` | 400 bad stage; 404 unknown hub; 503 if hub-service is down |
+| transit-service | `GET /eta/{hubId}` | 404 unknown hub; 503 naming whichever dependency is down |
+
+| Variable | Used by | Default |
+|---|---|---|
+| `INGESTION_URL` | hub-service | `http://localhost:7050` |
+| `HUB_SERVICE_URL` | delay-stage-service, transit-service | `http://localhost:7051` |
+| `DELAY_STAGE_URL` | transit-service | `http://localhost:7052` |
+
+### Decisions
+
+- **hub-service is the one place that knows about aliases.** `GET /hubs/H-504` answers with
+  H-500's record, so no other service needs the duplicate list. It loads its data from
+  ingestion-service on first use and keeps it; if ingestion-service is down, that request is a
+  503 and the next one tries again, so the services can start in any order.
+- **"No such hub" and "couldn't ask" are never confused.** 404 means the hub doesn't exist. If
+  a dependency can't be reached, answers with an error, or sends something unreadable, the
+  answer is a 503 whose message names that service. A 500 upstream is not passed through as
+  this service's own 500.
+- **A stage belongs to a real hub, so delay-stage-service checks with hub-service on reads as
+  well as writes.** An alias is stored and read under its canonical ID. Checking only on writes
+  would answer `GET /delay-stage/anything` with a confident 200 "stage 0", and stage 0 for an
+  alias whose hub is at stage 5. That is making data up.
+- **The body is validated before anyone is asked anything.** `{"stage": n}` with a whole number
+  from 0 to 8, or a 400 that says so. Setting the stage a hub is already at is answered with
+  `"changed": false`.
+- **Replies are read tolerantly but not credulously.** Each service keeps its own small copy of
+  the records it reads and ignores fields it doesn't use, so a producer can add fields without
+  breaking anyone. But a value it does use must be valid: a missing or malformed stage from
+  delay-stage-service is an error, not stage 0, which would report a hub as on time because of
+  a reply transit-service didn't understand.
+- **If two different hubs ever claim one ID** (not in this data; ingestion flags it in the
+  records' notes), the first keeps it for lookups and hub-service logs a warning.
+
+### The ETA model
+
+The legacy data has no transit times, so these are assumptions, all kept in `EtaCalculator`:
+
+- Metro provinces (Gauteng, Western Cape, KwaZulu-Natal): 24–48h. Everywhere else: 48–96h.
+- Each delay stage adds 12h to the earliest arrival and 24h to the latest, so a delay makes the
+  window both later and less certain.
+- Stage 8 is a shutdown (`SUSPENDED`, no window). An inactive hub is `HUB_INACTIVE`.
+- Every assumption behind an estimate is listed in `warnings`: an active flag the source didn't
+  give, an unknown province (the regional window is used), or a request made by alias.
+
+### What synchronous REST costs here
+
+Every ETA is three calls deep: transit asks hub-service, then asks delay-stage-service, which
+asks hub-service again. If any of them is down, the ETA is a 503, even though the stage rarely
+changes. The run below shows it: with delay-stage-service stopped, transit-service can't answer
+at all. Stage 3 removes that dependency.
+
+### Checked
+
+`mvn test`: 18 tests in hub-service, 25 in delay-stage-service, 29 in transit-service. The HTTP
+clients are tested against stub HTTP servers: status codes, unreadable and malformed replies,
+nothing listening.
+
+The four jars were also run together:
+
+| Scenario | Result |
+|---|---|
+| hub-service started before ingestion-service | 503 naming ingestion-service; 200 once it was up, no restart |
+| `POST /delay-stage/H-506 {"stage": 5}` (an alias) | stored as H-503; `GET /delay-stage/H-506` answered for H-503 |
+| `GET /eta/H-503` at stage 5 | `DELAYED`, 84–168h |
+| `GET /eta/h-515` with H-500 at stage 8 | answered for H-500: `SUSPENDED`, no window, alias warning |
+| `GET /eta/H-507`, `GET /eta/H-502` | `HUB_INACTIVE`; `ON_TIME` with "doesn't say whether this hub is active" |
+| stage 9; unknown hub; `GET /delay-stage/H-999` | 400; 404; 404 |
+| the same stage posted twice | 200, `"changed": false` |
+| delay-stage-service stopped | `GET /eta/H-503` → 503 naming delay-stage-service |
+| hub-service stopped | ETA, stage change and stage read all 503 naming hub-service |
