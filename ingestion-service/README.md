@@ -100,6 +100,9 @@ curl localhost:7050/hubs      # 10 hubs from 18 rows
 curl localhost:7050/report
 ```
 
+How each data issue above is handled, and why duplicates are merged the way they are, is in
+[IMPLEMENTATION.md](../IMPLEMENTATION.md#stage-1-cleaning-hubs-globalcsv).
+
 ## Test
 
 ```
