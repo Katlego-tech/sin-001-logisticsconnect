@@ -62,9 +62,17 @@ there's no single correct answer, but be ready to explain your reasoning.
 ```
 ingestion-service/
 ├── pom.xml
-└── src/main/
-    ├── java/co/wethinkcode/logisticsconnect/IngestionServiceApp.java
-    └── resources/hubs-global.csv
+└── src/
+    ├── main/
+    │   ├── java/co/wethinkcode/logisticsconnect/
+    │   │   ├── IngestionServiceApp.java   routes; cleans the bundled CSV at startup
+    │   │   ├── HubCsvCleaner.java         row cleaning, then merging duplicates
+    │   │   ├── Values.java                per-field rules (whitespace, placeholders, flags, casing)
+    │   │   ├── Provinces.java             the nine provinces and their spellings
+    │   │   ├── CleanHub.java              one cleaned hub
+    │   │   └── CleaningReport.java        rows read, ignored columns, rejected rows, hubs
+    │   └── resources/hubs-global.csv
+    └── test/java/co/wethinkcode/logisticsconnect/
 ```
 
 ## Build
@@ -79,16 +87,33 @@ mvn package
 java -jar target/ingestion-service.jar
 ```
 
-Listens on port `7050`. Currently just exposes `/health` — the actual CSV
-parsing/cleaning logic is a TODO.
+Listens on port `7050`. The CSV is cleaned once, at startup.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /hubs` | the cleaned records: one per real-world hub, sorted by ID, each with its `aliases` (the other IDs the export used for it) and `notes` (how the record was derived) |
+| `GET /report` | how they were derived: `rowsRead`, `ignoredColumns` (header columns the model doesn't use), `rejected` rows with their line in the file and the reason, and the `hubs` |
+| `GET /health` | `OK` |
+
+```
+curl localhost:7050/hubs      # 10 hubs from 18 rows
+curl localhost:7050/report
+```
+
+How each data issue above is handled, and why duplicates are merged the way they are, is in
+[IMPLEMENTATION.md](../IMPLEMENTATION.md#stage-1-cleaning-hubs-globalcsv).
 
 ## Test
 
-No automated tests yet. Manually verify it's up:
+```
+mvn test
+```
+
+Nothing else needs to be running. The suites cover each cleaning rule (`ValuesTest`), the
+row-level and merge behaviour including rejected rows (`HubCsvCleanerTest`), the real bundled
+file end to end (`BundledCsvTest`), and the endpoints over HTTP on a random port
+(`IngestionServiceAppTest`). To check a running instance is up:
 
 ```
 curl http://localhost:7050/health   # -> OK
 ```
-
-To add real tests, add JUnit 5 + the Surefire plugin to `pom.xml`, put tests under
-`src/test/java/co/wethinkcode/logisticsconnect/`, and run `mvn test`.

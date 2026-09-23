@@ -28,8 +28,9 @@ cleanup through synchronous REST calls to asynchronous MQ decoupling and alertin
 Plus [`common/`](common) (no port) — the shared ActiveMQ broker and MQ config notes
 for `package-status-topic`: Package status updates move from latency-driven RPC to bandwidth-driven messaging.
 
-**Status:** scaffold only — build files, Javalin bootstrap, and TODOs are in place; no
-business logic has been implemented yet.
+**Status:** stage 1 of 4 is implemented: `ingestion-service` cleans and serves
+`hubs-global.csv`. The other services are still the scaffold. [IMPLEMENTATION.md](IMPLEMENTATION.md)
+covers the decisions and what was checked.
 
 ## Your task
 
@@ -146,8 +147,9 @@ cd alertbot && mvn package && java -jar target/alertbot.jar
 
 ## Test
 
-No automated tests exist yet (this is a scaffold). Each running service exposes
-`/health`, so sanity-check manually:
+`ingestion-service` has JUnit tests that need nothing else running
+(`cd ingestion-service && mvn test`); the other modules don't have tests yet. Each running
+service exposes `/health`, so sanity-check manually:
 
 ```
 curl http://localhost:7050/health   # -> OK
