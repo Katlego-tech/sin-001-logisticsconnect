@@ -8,7 +8,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Each hub's Transit Delay Stage, 0 (normal) to 8 (shut down), kept under the hub's canonical
- * ID. A hub whose stage was never set is at stage 0.
+ * ID. A hub whose stage was never set is at stage 0. Every change is published to
+ * {@code package-status-topic} before it is recorded.
  */
 final class DelayStages {
 
@@ -24,9 +25,11 @@ final class DelayStages {
     }
 
     private final Map<String, Stage> stages = new ConcurrentHashMap<>();
+    private final StagePublisher publisher;
     private final Clock clock;
 
-    DelayStages(Clock clock) {
+    DelayStages(StagePublisher publisher, Clock clock) {
+        this.publisher = publisher;
         this.clock = clock;
     }
 
@@ -39,7 +42,14 @@ final class DelayStages {
         return stages.values().stream().sorted(Comparator.comparing(Stage::hubId)).toList();
     }
 
-    /** Synchronized so two concurrent changes can't both claim the same previous stage. */
+    /**
+     * Publishes first, then records. If the event can't be published the stage is left as it
+     * was, so this service never holds a change its subscribers were not told about.
+     *
+     * <p>Synchronized, publish included, so two concurrent changes can't both claim the same
+     * previous stage, or be published in one order and recorded in the other. The publish is
+     * bounded, so a misbehaving broker delays a queued change by seconds, not indefinitely.
+     */
     synchronized Change set(Hub hub, int stage) {
         if (stage < MIN_STAGE || stage > MAX_STAGE) {
             throw new IllegalArgumentException("stage must be between " + MIN_STAGE + " and " + MAX_STAGE);
@@ -49,6 +59,8 @@ final class DelayStages {
             return new Change(before.hubId(), stage, stage, before.updatedAt(), false);
         }
         String now = clock.instant().toString();
+        publisher.publish(new StageChanged(
+                before.hubId(), hub.sortingCenter(), hub.province(), stage, before.stage(), now));
         stages.put(before.hubId(), new Stage(before.hubId(), stage, now));
         return new Change(before.hubId(), stage, before.stage(), now, true);
     }
