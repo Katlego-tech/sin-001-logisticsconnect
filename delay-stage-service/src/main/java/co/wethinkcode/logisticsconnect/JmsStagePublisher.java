@@ -51,16 +51,30 @@ final class JmsStagePublisher implements StagePublisher, AutoCloseable {
 
     @Override
     public synchronized void publish(StageChanged event) {
+        String json;
+        try {
+            json = JSON.writeValueAsString(event);
+        } catch (JsonProcessingException e) {
+            throw new PublishFailed("could not write the event as JSON: " + e.getMessage(), e);
+        }
         try {
             if (producer == null) {
                 connect();
             }
-            producer.send(session.createTextMessage(JSON.writeValueAsString(event)));
-            log.info("Published to {}: {}", MqConfig.TOPIC, event);
-        } catch (JMSException | JsonProcessingException e) {
+        } catch (JMSException e) {
             discard(connection);
             throw new PublishFailed("could not publish to " + MqConfig.TOPIC + ": " + e.getMessage(), e);
         }
+        try {
+            producer.send(session.createTextMessage(json));
+        } catch (JMSException e) {
+            discard(connection);
+            // Unlike a failure to connect, a failed send may already be on its way: a broker that
+            // was hung can deliver it once it recovers.
+            throw new PublishOutcomeUnknown("the broker did not confirm the event on " + MqConfig.TOPIC
+                    + ": " + e.getMessage(), e);
+        }
+        log.info("Published to {}: {}", MqConfig.TOPIC, event);
     }
 
     private void connect() throws JMSException {

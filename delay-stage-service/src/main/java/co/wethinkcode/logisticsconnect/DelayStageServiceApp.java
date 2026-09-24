@@ -1,6 +1,7 @@
 package co.wethinkcode.logisticsconnect;
 
 import co.wethinkcode.logisticsconnect.StagePublisher.PublishFailed;
+import co.wethinkcode.logisticsconnect.StagePublisher.PublishOutcomeUnknown;
 import co.wethinkcode.logisticsconnect.mq.MqConfig;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -57,6 +58,12 @@ public class DelayStageServiceApp {
                 (e, ctx) -> ctx.status(503).json(Map.of("error", e.getMessage())));
         app.exception(PublishFailed.class,
                 (e, ctx) -> ctx.status(503).json(Map.of("error", "stage not changed: " + e.getMessage())));
+        // Not "not changed": the event may still reach the subscribers. Sending the same change
+        // again brings this service and them back into agreement.
+        app.exception(PublishOutcomeUnknown.class,
+                (e, ctx) -> ctx.status(503).json(Map.of("error", "stage not recorded: the broker did not confirm"
+                        + " the event in time, so subscribers may still receive it; send the same change again"
+                        + " once the broker is reachable (" + e.getMessage() + ")")));
 
         return app;
     }

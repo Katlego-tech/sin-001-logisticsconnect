@@ -43,8 +43,10 @@ final class DelayStages {
     }
 
     /**
-     * Publishes first, then records. If the event can't be published the stage is left as it
-     * was, so this service never holds a change its subscribers were not told about.
+     * Publishes first, then records. If the event can't be published, or the broker doesn't
+     * confirm it, the stage is left as it was, so this service never holds a change its
+     * subscribers were not told about. (An unconfirmed event may still reach them later; the
+     * caller is told so, and sending the same change again brings everyone into agreement.)
      *
      * <p>Synchronized, publish included, so two concurrent changes can't both claim the same
      * previous stage, or be published in one order and recorded in the other. The publish is

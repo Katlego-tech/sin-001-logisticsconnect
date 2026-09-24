@@ -1,6 +1,7 @@
 package co.wethinkcode.logisticsconnect;
 
 import co.wethinkcode.logisticsconnect.StagePublisher.PublishFailed;
+import co.wethinkcode.logisticsconnect.StagePublisher.PublishOutcomeUnknown;
 import co.wethinkcode.logisticsconnect.mq.MqConfig;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -93,7 +95,8 @@ class JmsStagePublisherTest {
 
             broker.stop();
             broker.waitUntilStopped();
-            assertThrows(PublishFailed.class, () -> publisher.publish(EVENT));
+            PublishFailed e = assertThrows(PublishFailed.class, () -> publisher.publish(EVENT));
+            assertFalse(e instanceof PublishOutcomeUnknown, "no connection, so it certainly wasn't sent");
 
             broker = startBroker(brokerUrl);
             publisher.publish(EVENT);
@@ -114,16 +117,21 @@ class JmsStagePublisherTest {
     }
 
     @Test
-    void aBrokerThatHangsMidConnectionFailsTheCallWithinSeconds() throws Exception {
+    void aBrokerThatHangsMidConnectionFailsTheCallWithinSecondsWithTheOutcomeUnknown() throws Exception {
         int brokerPort = broker.getTransportConnectors().get(0).getConnectUri().getPort();
         try (FreezableProxy proxy = new FreezableProxy(brokerPort);
              JmsStagePublisher publisher = new JmsStagePublisher("tcp://localhost:" + proxy.port())) {
             publisher.publish(EVENT); // connected, through the proxy
+            assertNotNull(subscriber.receive(2_000));
 
             proxy.freeze();
-
             assertTimeoutPreemptively(Duration.ofSeconds(6),
-                    () -> assertThrows(PublishFailed.class, () -> publisher.publish(EVENT)));
+                    () -> assertThrows(PublishOutcomeUnknown.class, () -> publisher.publish(EVENT)));
+
+            // Why "unknown" and not "failed": once the broker recovers, the send that timed out
+            // can still be delivered.
+            proxy.thaw();
+            assertNotNull(subscriber.receive(5_000), "the timed-out event arrived after all");
         }
     }
 
@@ -144,8 +152,9 @@ class JmsStagePublisherTest {
             acceptor.start();
 
             try (JmsStagePublisher publisher = new JmsStagePublisher("tcp://localhost:" + silent.getLocalPort())) {
-                assertTimeoutPreemptively(Duration.ofSeconds(8),
+                PublishFailed e = assertTimeoutPreemptively(Duration.ofSeconds(8),
                         () -> assertThrows(PublishFailed.class, () -> publisher.publish(EVENT)));
+                assertFalse(e instanceof PublishOutcomeUnknown, "never connected, so it certainly wasn't sent");
             }
         } finally {
             for (Socket socket : held) {
@@ -187,6 +196,10 @@ class JmsStagePublisherTest {
 
         void freeze() {
             frozen = true;
+        }
+
+        void thaw() {
+            frozen = false;
         }
 
         private void pump(Socket from, Socket to) {

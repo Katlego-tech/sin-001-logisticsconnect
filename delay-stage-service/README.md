@@ -60,8 +60,12 @@ Both `{hubId}` endpoints ask hub-service which hub the ID names, so an alias wor
 - `400` if the body isn't `{"stage": n}` with a whole number `n` from 0 to 8
 - `404` if hub-service knows no such hub
 - `503` if hub-service can't be reached
-- `503` `"stage not changed: …"` on a `POST` the broker didn't accept (down, or not answering
-  within about 3 seconds); the stage stays as it was
+- `503` `"stage not changed: …"` on a `POST` when the broker can't be reached: the event
+  certainly wasn't sent, and the stage stays as it was
+- `503` `"stage not recorded: the broker did not confirm the event in time, …"` when the event
+  was sent but not confirmed within about 3 seconds (a hung broker). The stage stays as it was
+  here, but the event may still reach subscribers once the broker recovers, so send the same
+  change again; that brings everything back into agreement
 
 | Variable | Default |
 |---|---|

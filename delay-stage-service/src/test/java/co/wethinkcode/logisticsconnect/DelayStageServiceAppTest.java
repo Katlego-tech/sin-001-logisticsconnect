@@ -186,4 +186,20 @@ class DelayStageServiceAppTest {
                 JSON.readTree(change.body()).get("error").asText());
         assertEquals(0, JSON.readTree(get("/delay-stage/H-500").body()).get("stage").asInt());
     }
+
+    @Test
+    void anUnconfirmedPublishIs503SayingTheOutcomeIsUnknownAndHowToFixIt() throws Exception {
+        DelayStages unconfirmed = new DelayStages(event -> {
+            throw new StagePublisher.PublishOutcomeUnknown("RequestTimedOutIOException", null);
+        }, Clock.systemUTC());
+        start(DelayStageServiceAppTest::onlyJoburg, unconfirmed);
+
+        HttpResponse<String> change = post("/delay-stage/H-500", "{\"stage\": 6}");
+
+        assertEquals(503, change.statusCode());
+        String error = JSON.readTree(change.body()).get("error").asText();
+        assertTrue(error.startsWith("stage not recorded: the broker did not confirm the event in time"), error);
+        assertTrue(error.contains("send the same change again"), error);
+        assertEquals(0, JSON.readTree(get("/delay-stage/H-500").body()).get("stage").asInt());
+    }
 }
