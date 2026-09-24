@@ -7,7 +7,7 @@ from the [README](README.md#your-task).
 |---|---|
 | 1. Clean `hubs-global.csv` | done |
 | 2. REST services | done |
-| 3. `package-status-topic` | built and tested; the live run against the broker is still to do |
+| 3. `package-status-topic` | done |
 | 4. AlertBot | not started |
 
 ## Stage 1: cleaning `hubs-global.csv`
@@ -197,11 +197,15 @@ cd common && docker compose up -d            # the broker (console: http://local
 
 ### Decisions
 
-- **Publish, then record.** delay-stage-service changes a stage only after the event reached
-  the broker. With the broker down, the POST is a 503 "stage not changed" and nothing changes,
-  so no subscriber ever misses a change this service claims happened. The change stays
-  synchronized through the publish, so two changes can't be published in one order and
+- **Publish, then record.** delay-stage-service changes a stage only after the broker confirms
+  the event, so no subscriber ever misses a change this service claims happened. The change
+  stays synchronized through the publish, so two changes can't be published in one order and
   recorded in the other.
+- **A timeout is reported as a timeout.** If the broker can't be reached, nothing was sent: 503
+  "stage not changed". But if a send isn't confirmed in time, the broker may still deliver it
+  once it recovers (the live run below saw exactly that), so the answer is a 503 "stage not
+  recorded … subscribers may still receive it; send the same change again". Repeating the
+  change brings this service and its subscribers back into agreement.
 - **Writes still check the hub with hub-service, synchronously, on purpose.** A stage has to
   belong to a real hub, and resolving aliases here means every event carries the canonical
   ID. Writes are rare. The per-request read in transit-service is the call worth decoupling,
@@ -225,8 +229,10 @@ cd common && docker compose up -d            # the broker (console: http://local
   broker restart without code of ours. The publisher uses plain `tcp://`, because `failover:`
   would hold the caller's HTTP request until the broker came back; the caller should get a
   prompt 503. Every wait the publisher makes is bounded to 3 seconds: the TCP connect (30s by
-  default), the OpenWire handshake (15s by default), the broker's reply and the send. Against a
-  broker that accepts the connection but never answers, a POST fails in about 3 seconds.
+  default), the OpenWire handshake (15s by default), the broker's reply and the send. A broken
+  connection is closed in the background (closing one to a hung broker waits 15s by default),
+  and a JMS `ExceptionListener` drops the connection as soon as the client notices the broker
+  has gone, so the next change reconnects instead of failing on a dead session.
 - **The HTTP port is bound before the subscriber starts.** If the port is taken, startup fails
   before a background subscriber exists that would keep a half-started process alive.
 - **The stage-2 path is kept behind the same interface.** `STAGE_SOURCE=rest` puts back the
@@ -247,23 +253,54 @@ cd common && docker compose up -d            # the broker (console: http://local
   hubs report the stage as assumed (`"stageKnown": false`, with a warning). Seeding the view
   from `GET /delay-stage` at startup would fill the gap, at the price of bringing back a call to
   delay-stage-service, which this stage exists to remove.
+- **Retrying an unconfirmed change can repeat an event.** Subscribers apply the stage again,
+  which is harmless for transit-service's view.
 - **One transit-service at a time.** The durable subscription is tied to a client ID; scaling
   out would need ActiveMQ virtual topics (a queue per consumer group).
 
 ### Checked
 
-`mvn test`: 33 tests in delay-stage-service, 53 in transit-service. The MQ tests run against a
-real in-process ActiveMQ broker, so they need no Docker:
+`mvn test`: 36 tests in delay-stage-service, 53 in transit-service. The MQ tests run against a
+real in-process ActiveMQ broker, so they need no Docker. Among them: the exact JSON arrives on
+the topic as a persistent message; an event published while transit-service was disconnected
+is delivered when it reconnects; invalid events are skipped; the view survives a restart. A
+TCP proxy that can freeze stands in for a hung broker: the publish fails within about 3
+seconds, and once the proxy thaws, the "failed" event arrives.
 
-- the exact JSON arrives on the topic, as a persistent message
-- broker down: the publish fails, the POST is a 503 "stage not changed", and the stage is
-  unchanged; broker back: the next publish reconnects
-- a broker that accepts the connection but never answers fails the publish in about 3 seconds
-- an event updates the view; an event published while transit-service was disconnected is
-  delivered when it reconnects (the durable subscription)
-- unreadable and invalid events are skipped and the subscription carries on
-- the view survives a restart from its saved file; a corrupt file stops startup
-- with the view as its stage source, an ETA needs no delay-stage-service at all
+### Verified end-to-end
 
-Not yet done: running the services together against the broker from
-[`common/docker-compose.yml`](common/docker-compose.yml) and watching a message flow end to end.
+The four services were run from their own folders against the broker from
+[`common/docker-compose.yml`](common/docker-compose.yml) (`apache/activemq-classic:5.18.3`),
+from a fresh broker, with the broker's own statistics (read through its Jolokia API) as
+evidence alongside the logs:
+
+| Scenario | Result |
+|---|---|
+| transit-service's first start | subscribed durably; the broker showed 1 active durable subscriber |
+| `POST /delay-stage/H-504 {"stage": 5}` (an alias) | stored and published as H-500; topic enqueued 1, dequeued 1; transit-service logged the update, and `GET /eta/H-500` answered `DELAYED`, stage 5, 84–168h, from its own view |
+| delay-stage-service stopped | the ETA still answered, stage 5. With `STAGE_SOURCE=rest`, the same request was a 503 naming delay-stage-service |
+| transit-service restarted with no new events | reloaded the stage from `data/stage-view.json`; the ETA was unchanged |
+| transit-service down while Durban went to stage 6 (by alias H-506) | the broker held the event for the inactive durable subscriber (enqueued 2, dequeued 1); on restart transit-service caught up: H-503 at stage 6 |
+| broker hung (`docker pause`) | the POST was a 503 "stage not recorded … subscribers may still receive it" in 3.0s; delay-stage-service kept stage 6; ETAs kept answering. After `docker unpause` the event *was* delivered, and repeating the change left both at 7 |
+| broker stopped | the POST was a 503 "stage not changed" in under 10ms; ETAs kept answering from the view |
+| broker back | the next POST succeeded; transit-service's `failover:` connection reconnected on its own and received it; the durable subscription survived the broker restart |
+| broker restarted with no change during the outage | the next POST succeeded first time |
+| a second transit-service started while the port was in use | exited with code 1, having made no subscription |
+| `STAGE_SOURCE=rset` | exited with code 1 before opening a port: "STAGE_SOURCE must be 'rest' or 'mq', not 'rset'" |
+| transit-service started while the broker was down | answered ETAs at once from its saved view, then subscribed when the broker returned and received the next change |
+
+The run also showed the first known limit above in action: after delay-stage-service was
+restarted, it reported H-500 at stage 0 while transit-service's view still had stage 5, until
+the next change.
+
+**Found by this run, and fixed** (each now has a test):
+
+- With the broker hung, a POST took **18 seconds** to fail: the send timed out after 3s, then
+  closing the dead connection waited 15s. Now about 3 seconds.
+- After a broker restart with no change in between, the first POST failed with "The Session is
+  closed", although the broker was up: the dead connection was only noticed when a send failed
+  on it. Now it is dropped as soon as the connection is lost.
+- A POST answered "stage not changed" could still reach the subscribers: the timed-out send
+  was delivered when the broker recovered, leaving transit-service at stage 7 and
+  delay-stage-service at 6, with the caller told nothing had changed. Now that case says the
+  outcome is unknown and how to fix it.
