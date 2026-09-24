@@ -17,7 +17,10 @@ delay-stage-service/
 └── src/
     ├── main/java/co/wethinkcode/logisticsconnect/
     │   ├── DelayStageServiceApp.java  routes; validates the request body
-    │   ├── DelayStages.java           each hub's stage, 0-8
+    │   ├── DelayStages.java           each hub's stage, 0-8; publishes, then records
+    │   ├── StageChanged.java          the event published on each change
+    │   ├── StagePublisher.java        "tell the subscribers"
+    │   ├── JmsStagePublisher.java     ...over JMS to package-status-topic
     │   ├── HubClient.java             GET /hubs/{hubId} from hub-service
     │   ├── HubLookup.java             "which hub does this ID name?"
     │   ├── Hub.java                   the part of hub-service's record this service uses
@@ -39,7 +42,10 @@ mvn package
 java -jar target/delay-stage-service.jar
 ```
 
-Listens on port `7052`. Stages are kept in memory, under each hub's canonical ID.
+Listens on port `7052`. Stages are kept in memory, under each hub's canonical ID. Every change
+is published to `package-status-topic` **before** it is recorded, so this service never holds a
+change its subscribers weren't told about. It needs the broker from [`../common/`](../common)
+to accept changes; reads work without it.
 
 | Endpoint | Returns |
 |---|---|
@@ -54,6 +60,12 @@ Both `{hubId}` endpoints ask hub-service which hub the ID names, so an alias wor
 - `400` if the body isn't `{"stage": n}` with a whole number `n` from 0 to 8
 - `404` if hub-service knows no such hub
 - `503` if hub-service can't be reached
+- `503` `"stage not changed: …"` on a `POST` when the broker can't be reached: the event
+  certainly wasn't sent, and the stage stays as it was
+- `503` `"stage not recorded: the broker did not confirm the event in time, …"` when the event
+  was sent but not confirmed within about 3 seconds (a hung broker). The stage stays as it was
+  here, but the event may still reach subscribers once the broker recovers, so send the same
+  change again; that brings everything back into agreement
 
 | Variable | Default |
 |---|---|
@@ -70,8 +82,10 @@ curl localhost:7052/delay-stage/H-500
 mvn test
 ```
 
-Nothing else needs to be running: the stage store is tested directly, the endpoints on a random
-port with hub-service faked, and the hub-service client against a stub HTTP server. To check a
+Nothing else needs to be running: the stage store is tested directly (published before
+recorded, nothing recorded when the publish fails), the endpoints on a random port with
+hub-service and the broker faked, the hub-service client against a stub HTTP server, and the
+publisher against a real in-process ActiveMQ broker (no Docker). To check a
 running instance is up:
 
 ```

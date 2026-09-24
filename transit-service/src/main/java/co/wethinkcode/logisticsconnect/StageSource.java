@@ -3,7 +3,8 @@ package co.wethinkcode.logisticsconnect;
 /**
  * Where transit-service gets a hub's current delay stage. Kept behind an interface so the ETA
  * endpoint doesn't care how the stage is found: {@link RestStageSource} asks delay-stage-service
- * on every request.
+ * on every request, and {@link StageView} answers from the events it has received on
+ * {@code package-status-topic}, calling nobody.
  */
 @FunctionalInterface
 interface StageSource {

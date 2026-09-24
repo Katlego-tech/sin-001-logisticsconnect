@@ -2,6 +2,7 @@ package co.wethinkcode.logisticsconnect;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import co.wethinkcode.logisticsconnect.StagePublisher.PublishFailed;
 import io.javalin.Javalin;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -25,7 +27,8 @@ class DelayStageServiceAppTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final HttpClient http = HttpClient.newHttpClient();
-    private final DelayStages stages = new DelayStages(Clock.systemUTC());
+    private final List<StageChanged> published = new ArrayList<>();
+    private final DelayStages stages = new DelayStages(published::add, Clock.systemUTC());
     private Javalin app;
 
     @AfterEach
@@ -45,7 +48,11 @@ class DelayStageServiceAppTest {
     };
 
     private void start(HubLookup hubs) {
-        app = DelayStageServiceApp.create(stages, hubs).start(0);
+        start(hubs, stages);
+    }
+
+    private void start(HubLookup hubs, DelayStages withStages) {
+        app = DelayStageServiceApp.create(withStages, hubs).start(0);
     }
 
     private HttpResponse<String> get(String path) throws Exception {
@@ -77,6 +84,9 @@ class DelayStageServiceAppTest {
         assertEquals(0, change.get("previousStage").asInt());
         assertTrue(change.get("changed").asBoolean());
         assertEquals(5, stages.current("H-500").stage());
+        assertEquals(1, published.size());
+        assertEquals("H-500", published.get(0).hubId(), "the event carries the canonical ID too");
+        assertEquals("Johannesburg Central", published.get(0).sortingCenter());
     }
 
     @Test
@@ -134,6 +144,7 @@ class DelayStageServiceAppTest {
         assertEquals(400, response.statusCode(), response.body());
         assertTrue(JSON.readTree(response.body()).get("error").asText().startsWith("body must be JSON like"));
         assertEquals(List.of(), stages.all());
+        assertTrue(published.isEmpty());
     }
 
     @Test
@@ -144,6 +155,7 @@ class DelayStageServiceAppTest {
 
         assertEquals(404, response.statusCode());
         assertEquals(List.of(), stages.all());
+        assertTrue(published.isEmpty());
     }
 
     @Test
@@ -157,5 +169,37 @@ class DelayStageServiceAppTest {
         assertEquals(503, read.statusCode());
         assertTrue(read.body().contains("hub-service is unreachable"), read.body());
         assertEquals(List.of(), stages.all());
+        assertTrue(published.isEmpty());
+    }
+
+    @Test
+    void brokerDownIs503StageNotChangedAndTheStageStaysAsItWas() throws Exception {
+        DelayStages brokerDown = new DelayStages(event -> {
+            throw new PublishFailed("could not publish to package-status-topic: Connection refused", null);
+        }, Clock.systemUTC());
+        start(DelayStageServiceAppTest::onlyJoburg, brokerDown);
+
+        HttpResponse<String> change = post("/delay-stage/H-500", "{\"stage\": 6}");
+
+        assertEquals(503, change.statusCode());
+        assertEquals("stage not changed: could not publish to package-status-topic: Connection refused",
+                JSON.readTree(change.body()).get("error").asText());
+        assertEquals(0, JSON.readTree(get("/delay-stage/H-500").body()).get("stage").asInt());
+    }
+
+    @Test
+    void anUnconfirmedPublishIs503SayingTheOutcomeIsUnknownAndHowToFixIt() throws Exception {
+        DelayStages unconfirmed = new DelayStages(event -> {
+            throw new StagePublisher.PublishOutcomeUnknown("RequestTimedOutIOException", null);
+        }, Clock.systemUTC());
+        start(DelayStageServiceAppTest::onlyJoburg, unconfirmed);
+
+        HttpResponse<String> change = post("/delay-stage/H-500", "{\"stage\": 6}");
+
+        assertEquals(503, change.statusCode());
+        String error = JSON.readTree(change.body()).get("error").asText();
+        assertTrue(error.startsWith("stage not recorded: the broker did not confirm the event in time"), error);
+        assertTrue(error.contains("send the same change again"), error);
+        assertEquals(0, JSON.readTree(get("/delay-stage/H-500").body()).get("stage").asInt());
     }
 }

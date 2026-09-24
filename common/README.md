@@ -58,11 +58,19 @@ Once the TODOs below are implemented, verify end-to-end by publishing a message 
 `delay-stage-service` and confirming the consumer(s) receive it — e.g. via logs, or by
 watching the topic in the web console.
 
-## TODO
+## Status
 
-- Add `activemq-client` publish logic to `delay-stage-service` on its stage/state-change endpoint.
-- Add `activemq-client` subscriber logic to consumer service(s) above, replacing any
-  direct synchronous calls to `delay-stage-service`.
-- `alertbot` (stretch goal) needs its own subscriber logic too — its `pom.xml`
+- Done: `delay-stage-service` publishes a `StageChanged` event on every stage change
+  (`POST /delay-stage/{hubId}`), before recording it.
+- Done: `transit-service` subscribes durably and answers ETAs from the events, replacing its
+  direct call to `delay-stage-service` (`STAGE_SOURCE=rest` puts the call back).
+- Not yet: `alertbot` (stretch goal) needs its own subscriber logic — its `pom.xml`
   already has the `activemq-client` dependency alongside the other participating
   services.
+
+Message body (JSON text message, persistent):
+
+```
+{"hubId":"H-500","sortingCenter":"Johannesburg Central","province":"Gauteng",
+ "stage":5,"previousStage":0,"timestamp":"2026-09-24T10:15:00Z"}
+```

@@ -1,5 +1,8 @@
 package co.wethinkcode.logisticsconnect;
 
+import co.wethinkcode.logisticsconnect.StagePublisher.PublishFailed;
+import co.wethinkcode.logisticsconnect.StagePublisher.PublishOutcomeUnknown;
+import co.wethinkcode.logisticsconnect.mq.MqConfig;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,7 +27,10 @@ public class DelayStageServiceApp {
 
     public static void main(String[] args) {
         String hubServiceUrl = System.getenv().getOrDefault("HUB_SERVICE_URL", "http://localhost:7051");
-        create(new DelayStages(Clock.systemUTC()), new HubClient(hubServiceUrl)).start(PORT);
+        JmsStagePublisher publisher = new JmsStagePublisher(MqConfig.BROKER_URL);
+        Runtime.getRuntime().addShutdownHook(new Thread(publisher::close));
+
+        create(new DelayStages(publisher, Clock.systemUTC()), new HubClient(hubServiceUrl)).start(PORT);
     }
 
     static Javalin create(DelayStages stages, HubLookup hubs) {
@@ -39,7 +45,8 @@ public class DelayStageServiceApp {
         // the hub it belongs to, and an ID that names no hub is a 404 rather than a made-up stage 0.
         app.get("/delay-stage/{hubId}", ctx -> withHub(ctx, hubs, hub -> ctx.json(stages.current(hub.hubId()))));
 
-        // The state-change endpoint. The body is checked before hub-service is asked anything.
+        // The state-change endpoint, and where the change is published to package-status-topic.
+        // The body is checked before hub-service is asked anything.
         app.post("/delay-stage/{hubId}", ctx -> {
             int stage = parseStage(ctx.body());
             withHub(ctx, hubs, hub -> ctx.json(stages.set(hub, stage)));
@@ -49,6 +56,14 @@ public class DelayStageServiceApp {
                 (e, ctx) -> ctx.status(400).json(Map.of("error", e.getMessage())));
         app.exception(UpstreamUnavailable.class,
                 (e, ctx) -> ctx.status(503).json(Map.of("error", e.getMessage())));
+        app.exception(PublishFailed.class,
+                (e, ctx) -> ctx.status(503).json(Map.of("error", "stage not changed: " + e.getMessage())));
+        // Not "not changed": the event may still reach the subscribers. Sending the same change
+        // again brings this service and them back into agreement.
+        app.exception(PublishOutcomeUnknown.class,
+                (e, ctx) -> ctx.status(503).json(Map.of("error", "stage not recorded: the broker did not confirm"
+                        + " the event in time, so subscribers may still receive it; send the same change again"
+                        + " once the broker is reachable (" + e.getMessage() + ")")));
 
         return app;
     }

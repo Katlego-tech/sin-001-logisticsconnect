@@ -19,7 +19,10 @@ transit-service/
     │   ├── TransitServiceApp.java     routes
     │   ├── EtaCalculator.java         the ETA model and its assumptions
     │   ├── StageSource.java           "what stage is this hub at?"
-    │   ├── RestStageSource.java       ...asked of delay-stage-service over REST
+    │   ├── StageView.java             ...answered from events received (the default)
+    │   ├── StageSubscriber.java       durable subscription feeding the view
+    │   ├── StageChanged.java          the event, as this service reads it
+    │   ├── RestStageSource.java       ...or asked of delay-stage-service (STAGE_SOURCE=rest)
     │   ├── HubClient.java             GET /hubs/{hubId} from hub-service
     │   ├── HubLookup.java             "which hub does this ID name?"
     │   ├── Hub.java                   the part of hub-service's record this service uses
@@ -41,8 +44,18 @@ mvn package
 java -jar target/transit-service.jar
 ```
 
-Listens on port `7053`. For each ETA it asks hub-service which hub the ID names, then asks
-delay-stage-service for that hub's current stage.
+Listens on port `7053`. For each ETA it asks hub-service which hub the ID names, then reads that
+hub's stage from its own **stage view**: a copy of every hub's stage, built from the events on
+`package-status-topic` and saved to `data/stage-view.json`. No call to delay-stage-service is
+made, so ETAs keep working while it's down.
+
+- The subscription is **durable**: while this service is down the broker keeps the events for
+  it, and it catches up when it returns. Only changes made before its very first start are
+  never replayed; for those hubs the ETA says the stage is assumed (`"stageKnown": false`).
+- It connects to the broker in the background and keeps retrying, so it starts (and answers)
+  even when the broker isn't up yet.
+- `STAGE_SOURCE=rest` puts back the stage-2 wiring: a REST call to delay-stage-service on every
+  ETA.
 
 | Endpoint | Returns |
 |---|---|
@@ -57,7 +70,9 @@ delay stage adds 12h to the earliest arrival and 24h to the latest; stage 8 is a
 | Variable | Default |
 |---|---|
 | `HUB_SERVICE_URL` | `http://localhost:7051` |
-| `DELAY_STAGE_URL` | `http://localhost:7052` |
+| `STAGE_SOURCE` | `mq` (the topic); `rest` for a call per ETA; anything else stops startup |
+| `STAGE_VIEW_FILE` | `data/stage-view.json` |
+| `DELAY_STAGE_URL` | `http://localhost:7052` (only with `STAGE_SOURCE=rest`) |
 
 ```
 curl localhost:7053/eta/H-503
@@ -69,9 +84,10 @@ curl localhost:7053/eta/H-503
 mvn test
 ```
 
-Nothing else needs to be running: the ETA model is tested directly, the endpoint on a random
-port with its two dependencies faked, and both clients against stub HTTP servers (status codes,
-unreadable or malformed replies, nothing listening). To check a running instance is up:
+Nothing else needs to be running: the ETA model and the stage view are tested directly
+(including a restart from the saved file), the endpoint on a random port with its dependencies
+faked, both HTTP clients against stub servers, and the subscription against a real in-process
+ActiveMQ broker (no Docker), including an event published while it was disconnected. To check a running instance is up:
 
 ```
 curl http://localhost:7053/health   # -> OK

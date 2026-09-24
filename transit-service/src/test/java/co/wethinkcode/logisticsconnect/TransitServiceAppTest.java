@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TransitServiceAppTest {
@@ -32,7 +34,9 @@ class TransitServiceAppTest {
 
     @AfterEach
     void stop() {
-        app.stop();
+        if (app != null) {
+            app.stop();
+        }
     }
 
     private HttpResponse<String> get(HubLookup hubs, StageSource stages, String path) throws Exception {
@@ -103,5 +107,43 @@ class TransitServiceAppTest {
 
         assertEquals(503, response.statusCode());
         assertTrue(response.body().contains("delay-stage-service is unreachable"), response.body());
+    }
+
+    @Test
+    void fromTheTopicAnEtaNeedsNoDelayStageServiceAtAll() throws Exception {
+        StageView view = new StageView();
+        view.apply(new StageChanged("H-500", 5, "2026-07-18T09:30:00Z"));
+
+        HttpResponse<String> response = get(id -> Optional.of(EtaCalculatorTest.JOBURG), view, "/eta/H-500");
+
+        assertEquals(200, response.statusCode());
+        JsonNode eta = JSON.readTree(response.body());
+        assertEquals("DELAYED", eta.get("status").asText());
+        assertEquals(5, eta.get("stage").asInt());
+        assertEquals("2026-07-18T09:30:00Z", eta.get("stageAsOf").asText());
+        assertTrue(eta.get("stageKnown").asBoolean());
+    }
+
+    @Test
+    void aHubWithNoEventYetIsAnsweredWithTheAssumptionSpelledOut() throws Exception {
+        HttpResponse<String> response = get(id -> Optional.of(EtaCalculatorTest.JOBURG), new StageView(), "/eta/H-500");
+
+        JsonNode eta = JSON.readTree(response.body());
+        assertFalse(eta.get("stageKnown").asBoolean());
+        assertTrue(eta.get("warnings").get(0).asText().contains("stage 0 is assumed"));
+    }
+
+    @Test
+    void theTopicIsTheDefaultStageSourceAndRestCanBeChosen() {
+        assertEquals(TransitServiceApp.StageMode.MQ, TransitServiceApp.stageMode(null));
+        assertEquals(TransitServiceApp.StageMode.MQ, TransitServiceApp.stageMode(" MQ "));
+        assertEquals(TransitServiceApp.StageMode.REST, TransitServiceApp.stageMode("rest"));
+    }
+
+    @Test
+    void aMistypedStageSourceStopsStartupInsteadOfQuietlyPickingOne() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> TransitServiceApp.stageMode("rset"));
+
+        assertEquals("STAGE_SOURCE must be 'rest' or 'mq', not 'rset'", e.getMessage());
     }
 }
