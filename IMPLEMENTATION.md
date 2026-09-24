@@ -272,7 +272,9 @@ seconds, and once the proxy thaws, the "failed" event arrives.
 The four services were run from their own folders against the broker from
 [`common/docker-compose.yml`](common/docker-compose.yml) (`apache/activemq-classic:5.18.3`),
 from a fresh broker, with the broker's own statistics (read through its Jolokia API) as
-evidence alongside the logs:
+evidence alongside the logs. The whole run was repeated after the
+[dependency upgrades](#dependencies-and-known-vulnerabilities) (the 5.19.11 client against the
+same 5.18.3 broker), with the same results:
 
 | Scenario | Result |
 |---|---|
@@ -304,3 +306,37 @@ the next change.
   was delivered when the broker recovered, leaving transit-service at stage 7 and
   delay-stage-service at 6, with the caller told nothing had changed. Now that case says the
   outcome is unknown and how to fix it.
+
+## Dependencies and known vulnerabilities
+
+The versions pinned in the scaffold carried 26 known advisories (osv-scanner, which reads each
+`pom.xml`). They were upgraded within compatible lines, so no code had to change:
+
+| Dependency | From | To |
+|---|---|---|
+| `jackson-databind` (and `jackson-core`) | 2.15.2 | 2.22.3 |
+| `activemq-client`, and the in-process test broker | 5.18.3 | 5.19.11 (still `javax.jms`) |
+| `opencsv` (bringing `commons-beanutils` 1.11.0, `commons-lang3` 3.18.0) | 5.9 | 5.12.0 |
+| `javalin` | 5.6.3 | 5.6.5 |
+| Jetty, pinned through its BOM (Javalin 5 still brings 11.0.17) | 11.0.17 | 11.0.26, the newest Jetty 11 |
+
+All the tests passed unchanged, and the end-to-end run above was repeated on the new jars.
+
+**Five advisories remain**, all in Jetty 11.0.26. Their fixes are only in Jetty 12, which needs
+Javalin 7, or in Jetty 11 releases that were never published to Maven Central:
+
+| Advisory | Severity | What it is | Exposure here |
+|---|---|---|---|
+| GHSA-355h-qmc2-wpwf | high | HTTP request smuggling through chunked-encoding extensions | the one that could matter, mainly with a proxy in front that parses chunked bodies differently |
+| GHSA-2fvj-hgj9-j2gr | high | Digest authentication bypass | none: no service uses authentication |
+| GHSA-7p3p-8qv8-m2vh | moderate | Host/authority mismatch | none: nothing is decided from the Host header |
+| GHSA-qh8g-58pp-2wxh | moderate | invalid URI authority parsing (`HttpURI`) | none: no service validates URLs with it |
+| GHSA-wjpw-4j6x-6rwh | low | invalid URI parsing differences | none, as above |
+
+Moving to Javalin 7 (Jetty 12.1) would clear all five. It is a major version: routes and
+exception handlers move into `Javalin.create(config -> ...)`, which touches every service.
+
+**The broker image** in `common/docker-compose.yml` stays at the scaffold's 5.18.3. Nine
+advisories affect the ActiveMQ broker (not the client), fixed in 5.19.4–5.19.7 and 6.2.3–6.2.4,
+but the newest official images are 5.19.2 and 6.2.0, so no published image fixes them yet.
+The broker is a local development dependency here, bound to localhost.
