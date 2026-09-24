@@ -16,7 +16,8 @@ import java.time.Duration;
 /**
  * Asks delay-stage-service for the hub's stage on every ETA request
  * ({@code GET /delay-stage/{hubId}}). Simple and always current, but every ETA then depends on
- * delay-stage-service being up: if it isn't, the ETA is a 503.
+ * delay-stage-service being up: if it isn't, the ETA is a 503. Selected with
+ * {@code STAGE_SOURCE=rest}; by default {@link StageView} removes that dependency.
  */
 final class RestStageSource implements StageSource {
 
