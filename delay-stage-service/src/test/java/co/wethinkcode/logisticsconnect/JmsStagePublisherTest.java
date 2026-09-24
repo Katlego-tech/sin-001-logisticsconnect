@@ -14,11 +14,14 @@ import javax.jms.MessageConsumer;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -98,6 +101,33 @@ class JmsStagePublisherTest {
     }
 
     @Test
+    void aBrokerRestartBetweenPublishesDoesNotFailTheNextOne() throws Exception {
+        try (JmsStagePublisher publisher = new JmsStagePublisher(brokerUrl)) {
+            publisher.publish(EVENT);
+
+            broker.stop();
+            broker.waitUntilStopped();
+            broker = startBroker(brokerUrl);
+
+            publisher.publish(EVENT); // the broker is up, so this must not fail on the old, dead session
+        }
+    }
+
+    @Test
+    void aBrokerThatHangsMidConnectionFailsTheCallWithinSeconds() throws Exception {
+        int brokerPort = broker.getTransportConnectors().get(0).getConnectUri().getPort();
+        try (FreezableProxy proxy = new FreezableProxy(brokerPort);
+             JmsStagePublisher publisher = new JmsStagePublisher("tcp://localhost:" + proxy.port())) {
+            publisher.publish(EVENT); // connected, through the proxy
+
+            proxy.freeze();
+
+            assertTimeoutPreemptively(Duration.ofSeconds(6),
+                    () -> assertThrows(PublishFailed.class, () -> publisher.publish(EVENT)));
+        }
+    }
+
+    @Test
     void aBrokerThatAcceptsTheConnectionButNeverAnswersFailsWithinSeconds() throws Exception {
         List<Socket> held = new ArrayList<>();
         try (ServerSocket silent = new ServerSocket(0)) {
@@ -119,6 +149,74 @@ class JmsStagePublisherTest {
             }
         } finally {
             for (Socket socket : held) {
+                socket.close();
+            }
+        }
+    }
+
+    /**
+     * A TCP proxy to the broker that can freeze: its connections stay open but nothing gets
+     * through any more, which is what a hung broker looks like to a client already connected.
+     */
+    private static final class FreezableProxy implements AutoCloseable {
+
+        private final ServerSocket server = new ServerSocket(0);
+        private final List<Socket> sockets = new CopyOnWriteArrayList<>();
+        private volatile boolean frozen;
+
+        FreezableProxy(int brokerPort) throws IOException {
+            daemon(() -> {
+                try {
+                    while (true) {
+                        Socket client = server.accept();
+                        Socket upstream = new Socket("localhost", brokerPort);
+                        sockets.add(client);
+                        sockets.add(upstream);
+                        daemon(() -> pump(client, upstream));
+                        daemon(() -> pump(upstream, client));
+                    }
+                } catch (IOException closed) {
+                    // the proxy was closed
+                }
+            });
+        }
+
+        int port() {
+            return server.getLocalPort();
+        }
+
+        void freeze() {
+            frozen = true;
+        }
+
+        private void pump(Socket from, Socket to) {
+            byte[] buffer = new byte[8192];
+            try {
+                InputStream in = from.getInputStream();
+                OutputStream out = to.getOutputStream();
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    while (frozen) {
+                        Thread.sleep(50); // hold the bytes: nothing gets through
+                    }
+                    out.write(buffer, 0, read);
+                    out.flush();
+                }
+            } catch (IOException | InterruptedException closed) {
+                // one side went away
+            }
+        }
+
+        private static void daemon(Runnable task) {
+            Thread thread = new Thread(task);
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        @Override
+        public void close() throws IOException {
+            server.close();
+            for (Socket socket : sockets) {
                 socket.close();
             }
         }
