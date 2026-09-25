@@ -28,10 +28,11 @@ cleanup through synchronous REST calls to asynchronous MQ decoupling and alertin
 Plus [`common/`](common) (no port) — the shared ActiveMQ broker and MQ config notes
 for `package-status-topic`: Package status updates move from latency-driven RPC to bandwidth-driven messaging.
 
-**Status:** stages 1–3 of 4 are implemented and verified end to end against the broker:
+**Status:** all four stages are implemented and verified end to end against the broker:
 `hubs-global.csv` is cleaned and served, hub-service, delay-stage-service and transit-service
 work over REST, and stage changes reach transit-service through `package-status-topic` instead
-of a direct call. `alertbot` (stage 4, the stretch goal) is still the scaffold.
+of a direct call. `alertbot` (stage 4) subscribes to the same topic and posts simulated delay
+alerts when a hub crosses a threshold.
 [IMPLEMENTATION.md](IMPLEMENTATION.md) covers the decisions and what was checked.
 
 ## Your task
@@ -149,7 +150,7 @@ cd alertbot && mvn package && java -jar target/alertbot.jar
 
 ## Test
 
-Every module except `alertbot` has JUnit tests that need nothing else running: run `mvn test`
+Every module has JUnit tests that need nothing else running: run `mvn test`
 in a module's folder. Each running service also exposes `/health`, so sanity-check manually:
 
 ```
