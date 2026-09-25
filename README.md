@@ -170,3 +170,7 @@ curl http://localhost:7050/health   # -> OK
 
 The end-to-end runs, with every service and the broker together, are recorded in
 [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
+## Verification
+
+WTC-WPYK8WY4
