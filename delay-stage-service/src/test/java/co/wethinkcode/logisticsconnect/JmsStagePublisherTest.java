@@ -103,16 +103,32 @@ class JmsStagePublisherTest {
         }
     }
 
+    private static void awaitNoConnection(JmsStagePublisher publisher) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (publisher.isConnected()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("the publisher never noticed the broker had gone");
+            }
+            Thread.sleep(5);
+        }
+    }
+
     @Test
     void aBrokerRestartBetweenPublishesDoesNotFailTheNextOne() throws Exception {
         try (JmsStagePublisher publisher = new JmsStagePublisher(brokerUrl)) {
             publisher.publish(EVENT);
 
-            broker.stop();
-            broker.waitUntilStopped();
-            broker = startBroker(brokerUrl);
+            for (int restart = 1; restart <= 25; restart++) {
+                broker.stop();
+                broker.waitUntilStopped();
+                // The client notices a lost connection asynchronously. A publish that races it is
+                // sent on the old socket, and then its outcome really is unknown, as with a hung
+                // broker. This test is about what happens once the loss has been noticed.
+                awaitNoConnection(publisher);
+                broker = startBroker(brokerUrl);
 
-            publisher.publish(EVENT); // the broker is up, so this must not fail on the old, dead session
+                publisher.publish(EVENT); // the broker is up, so this must not fail on the old, dead session
+            }
         }
     }
 
