@@ -1,14 +1,20 @@
 # LogisticsConnect: implementation notes
 
-What was built, the decisions behind it, and what was checked. This file grows with each stage
-from the [README](README.md#your-task).
+What was built, the decisions behind it, and what was checked, one section per stage from the
+[README](README.md#your-task). The last sections pull the tradeoffs together: [REST or
+MQ](#rest-or-mq-stage-by-stage), [what we'd do with more time](#with-more-time), and the
+[dependencies](#dependencies-and-known-vulnerabilities).
 
-| Stage | State |
-|---|---|
-| 1. Clean `hubs-global.csv` | done |
-| 2. REST services | done |
-| 3. `package-status-topic` | done |
-| 4. AlertBot | done |
+| Stage | State | Tests |
+|---|---|---|
+| 1. Clean `hubs-global.csv` | done | 51 in ingestion-service |
+| 2. REST services | done | 18 in hub-service |
+| 3. `package-status-topic` | done | 36 in delay-stage-service, 53 in transit-service |
+| 4. AlertBot | done | 42 in alertbot |
+
+200 tests in all, each module's run by `mvn test` in its folder with nothing else running: the
+messaging tests start an in-process ActiveMQ broker. Stages 2–4 were also run end to end, all
+services together, and the results are in each stage's tables.
 
 ## Stage 1: cleaning `hubs-global.csv`
 
@@ -253,8 +259,9 @@ cd common && docker compose up -d            # the broker (console: http://local
   hubs report the stage as assumed (`"stageKnown": false`, with a warning). Seeding the view
   from `GET /delay-stage` at startup would fill the gap, at the price of bringing back a call to
   delay-stage-service, which this stage exists to remove.
-- **Retrying an unconfirmed change can repeat an event.** Subscribers apply the stage again,
-  which is harmless for transit-service's view.
+- **Retrying an unconfirmed change can repeat an event.** transit-service applies the stage
+  again, which is harmless for its view. alertbot has no way to tell it's a repeat, so if the
+  change was news it posts the same alert twice.
 - **One transit-service at a time.** The durable subscription is tied to a client ID; scaling
   out would need ActiveMQ virtual topics (a queue per consumer group).
 
@@ -396,6 +403,39 @@ through its Jolokia API:
 | that receiver stopped | the next post recorded `webhook failed: ConnectException`; alertbot carried on |
 | a second alertbot started while the port was in use | exited with code 1, having made no subscription |
 | `ALERT_THRESHOLD=9` | exited with code 1: "ALERT_THRESHOLD must be a whole number from 1 to 8, not '9'" |
+
+## REST or MQ, stage by stage
+
+| Integration | Kind | Why |
+|---|---|---|
+| hub-service loads hubs from ingestion-service | REST, once, then kept | the data is fixed for the life of the process; hub-service needs all of it before it can answer anything |
+| delay-stage-service checks a hub with hub-service on every write and read | REST | it's asking a question and can't go on without the answer: is this a real hub, and what is its canonical ID? A 503 is the right result when nobody can say |
+| transit-service asks hub-service for a hub's location per ETA | REST | also a question with an answer needed now; hub data barely changes, so this is the call a cache would absorb next |
+| transit-service's per-ETA stage lookup (stage 2) | REST, **replaced** by the topic | stages change rarely and are read constantly, so asking for each one made every ETA three calls deep and a 503 whenever delay-stage-service was down |
+| a stage changes | MQ topic, `package-status-topic` | it's a fact other services react to, not a question. A topic lets the publisher announce it once without knowing who listens, and lets each subscriber pick the delivery it needs |
+| transit-service's subscription | durable, with a saved view | its answers must converge on the true stages, so it needs the changes it missed while down |
+| alertbot's subscription | non-durable | a public alert delivered hours late is worse than none, so it wants only what happens while it's listening |
+
+The rule of thumb that fell out: **call a service when you need an answer to carry on; publish
+when something happened and others may care.** A queue would have been wrong for stage changes:
+each message goes to one consumer, and here two consumers each need every change.
+
+## With more time
+
+- **Give delay-stage-service a database and a transactional outbox.** It is the source of truth
+  for stages, yet it restarts empty and then disagrees with transit-service's saved view.
+  With a database, "publish, then record" becomes "record the change and the event in one
+  transaction, publish from the outbox", which also removes the unknown-outcome case.
+- **Seed transit-service's view on its very first start**, so it doesn't report hubs as
+  "assumed" until each one next changes. It costs one startup call to delay-stage-service.
+- **Scale transit-service out with ActiveMQ virtual topics.** One durable subscription is tied
+  to one client ID, so today there can be only one instance.
+- **Give alertbot a small memory of what it posted**, per hub, kept across restarts. That would
+  stop an `UPDATE` appearing after downtime with no `DELAY ALERT` before it, and stop a
+  repeated event from being posted twice.
+- **Move to Javalin 7 (Jetty 12)** to clear the last five advisories (see below).
+- **Keep the alias map as editable master data.** Today it is derived from one CSV; a real
+  master-data service would let an operator correct a wrong merge.
 
 ## Dependencies and known vulnerabilities
 

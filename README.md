@@ -122,6 +122,9 @@ find . -name pom.xml -execdir mvn -q package \;
 ## Run
 
 ```
+# MQ broker (stages 3 and 4)
+cd common && docker compose up -d
+
 # ingestion
 cd ingestion-service && mvn package && java -jar target/ingestion-service.jar
 
@@ -132,9 +135,6 @@ cd hub-service && mvn package && java -jar target/hub-service.jar
 cd delay-stage-service && mvn package && java -jar target/delay-stage-service.jar
 # terminal 3
 cd transit-service && mvn package && java -jar target/transit-service.jar
-
-# MQ broker (needed once the MQ-aware services above are wired up)
-cd common && docker compose up -d
 
 # alerting
 cd alertbot && mvn package && java -jar target/alertbot.jar
@@ -150,34 +150,23 @@ cd alertbot && mvn package && java -jar target/alertbot.jar
 
 ## Test
 
-Every module has JUnit tests that need nothing else running: run `mvn test`
-in a module's folder. Each running service also exposes `/health`, so sanity-check manually:
+Every module has JUnit tests that need nothing else running: run `mvn test` in a module's
+folder. The messaging tests start an in-process ActiveMQ broker, so Docker isn't needed for
+them.
+
+| Module | Tests |
+|---|---|
+| `ingestion-service` | 51 |
+| `hub-service` | 18 |
+| `delay-stage-service` | 36 |
+| `transit-service` | 53 |
+| `alertbot` | 42 |
+
+Each running service also exposes `/health` for a quick manual check:
 
 ```
 curl http://localhost:7050/health   # -> OK
 ```
 
-To add real tests to a module, add JUnit 5 and Surefire to its `pom.xml`:
-
-```xml
-<dependency>
-  <groupId>org.junit.jupiter</groupId>
-  <artifactId>junit-jupiter</artifactId>
-  <version>5.10.2</version>
-  <scope>test</scope>
-</dependency>
-```
-
-```xml
-<plugin>
-  <groupId>org.apache.maven.plugins</groupId>
-  <artifactId>maven-surefire-plugin</artifactId>
-  <version>3.2.5</version>
-</plugin>
-```
-
-then add tests under that module's `src/test/java/...` and run:
-
-```
-mvn test
-```
+The end-to-end runs, with every service and the broker together, are recorded in
+[IMPLEMENTATION.md](IMPLEMENTATION.md).

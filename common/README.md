@@ -54,9 +54,9 @@ from their own directories at the project root).
 docker compose ps          # confirm the broker container is healthy
 ```
 
-Once the TODOs below are implemented, verify end-to-end by publishing a message from
-`delay-stage-service` and confirming the consumer(s) receive it — e.g. via logs, or by
-watching the topic in the web console.
+To verify end-to-end, change a stage through `delay-stage-service` and confirm both
+consumers receive it: via their logs, `GET /eta/{hubId}` and `GET /posts`, or by watching the
+topic in the web console. The runs are recorded in [IMPLEMENTATION.md](../IMPLEMENTATION.md).
 
 ## Status
 
