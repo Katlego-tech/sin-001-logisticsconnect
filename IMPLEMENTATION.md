@@ -262,6 +262,12 @@ cd common && docker compose up -d            # the broker (console: http://local
 - **Retrying an unconfirmed change can repeat an event.** transit-service applies the stage
   again, which is harmless for its view. alertbot has no way to tell it's a repeat, so if the
   change was news it posts the same alert twice.
+- **A change that races a broker restart can come back as "outcome unknown".** The publisher
+  learns that its connection has gone only when the client notices, a moment after the broker
+  does. A change sent in that moment goes out on the dead connection, so the caller gets the
+  503 that says to send it again, although this time nothing was delivered. Retrying is safe.
+  The automated tests caught it: about one run in twenty, under load, until the restart test
+  waited for the loss to be noticed.
 - **One transit-service at a time.** The durable subscription is tied to a client ID; scaling
   out would need ActiveMQ virtual topics (a queue per consumer group).
 

@@ -91,6 +91,11 @@ final class JmsStagePublisher implements StagePublisher, AutoCloseable {
         log.info("Connected to {}", factory.getBrokerURL());
     }
 
+    /** Whether a connection is held; false once a lost one has been noticed and dropped. */
+    synchronized boolean isConnected() {
+        return connection != null;
+    }
+
     /**
      * Forgets {@code broken} if it is still the current connection, so the next publish
      * reconnects, and closes it on a background thread rather than the caller's.
