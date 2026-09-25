@@ -9,21 +9,34 @@ Independent Maven module, no parent pom.
 
 Mechanism: Outbound webhook, simulated social post
 
-MQ (stretch goal): this service subscribes to the ActiveMQ topic
-`package-status-topic` — see [`../common/`](../common). Broker URL and topic name
-come from the common `co.wethinkcode.logisticsconnect.mq.MqConfig` class alongside
-it in this module. Use the stage in each message to decide when to raise an alert
-(e.g. above a threshold you choose).
+It subscribes (non-durably) to the ActiveMQ topic `package-status-topic` — see
+[`../common/`](../common). Broker URL and topic name come from the common
+`co.wethinkcode.logisticsconnect.mq.MqConfig` class alongside it in this module. When a hub
+crosses `ALERT_THRESHOLD` (default 4), gets worse while over it, reaches stage 8, leaves it,
+or drops back under, it posts a simulated alert; anything else is logged as not news.
+[IMPLEMENTATION.md](../IMPLEMENTATION.md#stage-4-alertbot) has the full table and the
+reasoning.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `ALERT_THRESHOLD` | delay stage (1–8) worth a public post; anything else stops startup | `4` |
+| `ALERTBOT_WEBHOOK_URL` | also send each post there as `{"text": …}` | unset: logged only |
 
 ## Project structure
 
 ```
 alertbot/
 ├── pom.xml
-└── src/main/java/co/wethinkcode/logisticsconnect/
-    ├── AlertBotApp.java
-    └── mq/
-        └── MqConfig.java
+└── src/
+    ├── main/java/co/wethinkcode/logisticsconnect/
+    │   ├── AlertBotApp.java       GET /health, GET /posts; binds the port, then subscribes
+    │   ├── StageSubscriber.java   non-durable subscription to package-status-topic
+    │   ├── StageChanged.java      the event, validated as it is read
+    │   ├── AlertPolicy.java       which changes are worth a post, and its wording
+    │   ├── SocialFeed.java        the simulated page: newest 50 posts, optional webhook
+    │   └── mq/
+    │       └── MqConfig.java
+    └── test/java/co/wethinkcode/logisticsconnect/
 ```
 
 ## Build
@@ -38,15 +51,17 @@ mvn package
 java -jar target/alertbot.jar
 ```
 
-Listens on port `7054`.
+Listens on port `7054`. What would have been posted, newest first:
+
+```
+curl http://localhost:7054/posts   # -> {"threshold":4,"posts":[{"hubId","stage","text","postedAt","delivery"}, …]}
+```
 
 ## Test
 
-No automated tests yet. Manually verify it's up:
+Run this module's tests with `mvn test` (nothing else needs to be running: the MQ tests use an
+in-process ActiveMQ broker). To check a running instance is up:
 
 ```
 curl http://localhost:7054/health   # -> OK
 ```
-
-To add real tests, add JUnit 5 + the Surefire plugin to `pom.xml`, put tests under
-`src/test/java/co/wethinkcode/logisticsconnect/`, and run `mvn test`.

@@ -8,7 +8,7 @@ from the [README](README.md#your-task).
 | 1. Clean `hubs-global.csv` | done |
 | 2. REST services | done |
 | 3. `package-status-topic` | done |
-| 4. AlertBot | not started |
+| 4. AlertBot | done |
 
 ## Stage 1: cleaning `hubs-global.csv`
 
@@ -306,6 +306,96 @@ the next change.
   was delivered when the broker recovered, leaving transit-service at stage 7 and
   delay-stage-service at 6, with the caller told nothing had changed. Now that case says the
   outcome is unknown and how to fix it.
+
+## Stage 4: alertbot
+
+```
+package-status-topic ──non-durable──▶ alertbot ──▶ AlertPolicy ──▶ simulated social feed (GET /posts)
+                                                                  └─▶ optional webhook, POST {"text": …}
+```
+
+```
+cd alertbot && mvn package && java -jar target/alertbot.jar
+curl http://localhost:7054/posts     # {"threshold":4,"posts":[{"hubId","stage","text","postedAt","delivery"}, …]}
+```
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `ALERT_THRESHOLD` | the delay stage (1–8) at which a hub is worth a public post | `4` |
+| `ALERTBOT_WEBHOOK_URL` | if set, each post is also sent there as `{"text": …}` (the shape Slack/Discord-style incoming webhooks accept) | unset: logged only |
+
+### Decisions
+
+- **It subscribes non-durably, the opposite of transit-service, on purpose.** A change that
+  happened while alertbot was down would be posted late, possibly after the hub had recovered.
+  A stale public alert is worse than none. One topic, two subscribers with opposite delivery
+  needs: that is what a topic is for, and why neither subscriber is a direct call from
+  delay-stage-service.
+- **Only news is posted.** With the threshold at 4:
+
+  | Change | Post |
+  |---|---|
+  | crosses the threshold (e.g. 2 → 5) | `DELAY ALERT: parcels via Johannesburg Central (Gauteng) are delayed, delay stage 5 of 8. Please allow extra time.` |
+  | gets worse while over it (5 → 6) | `UPDATE: delays via … are getting worse, now stage 6 (was 5).` |
+  | reaches stage 8 | `SUSPENDED: deliveries via … are suspended (delay stage 8). We'll post again when they resume.` |
+  | leaves stage 8 but stays delayed (8 → 5) | `UPDATE: deliveries via … have resumed but are still delayed, delay stage 5 of 8.` |
+  | drops back under (5 → 2, or 8 → 1) | `RESOLVED: … is back to delay stage 2. Deliveries are returning to normal.` |
+  | stays under (1 → 2), or eases while over (6 → 5) | nothing, logged as "not news" |
+
+  The suspension post promises another one, so leaving stage 8 always posts.
+- **It keeps no memory.** Each event carries the stage it moved from, so the decision needs
+  nothing but the event. The event also carries the hub's name and province, so alertbot never
+  calls hub-service.
+- **Events are validated before anything is posted.** A missing stage or previous stage, a
+  stage outside 0–8, a blank hub ID or a bad timestamp gets the message logged and dropped;
+  otherwise a missing stage would read as 0 and a post could announce "stage 42". A missing
+  name is allowed: the post then names the hub by its ID.
+- **A threshold outside 1–8 stops startup.** 0 would make every change news and 9 would never
+  alert, so a typo must not quietly mean either.
+- **Posting is simulated.** Each post is logged and the newest 50 are kept for `GET /posts`,
+  each with how it was delivered: `simulated: logged only`, `webhook 200`, or
+  `webhook failed: …`. A failed webhook is recorded on the post, never thrown, so it can't stop
+  the subscription.
+
+### Known limits
+
+- **After downtime, its first post about a hub may be an `UPDATE` with no alert before it.**
+  Seen in the run below: alertbot was down while Durban went 2 → 6, so no `DELAY ALERT` went
+  out. When Durban then went to 7, it posted "getting worse, now stage 7 (was 6)". True, but
+  it's the first thing followers heard. Fixing it needs alertbot to remember what it has
+  posted, per hub, across restarts.
+- **The feed lives in memory.** A restart empties `GET /posts`; the real record would be the
+  social page itself.
+
+### Checked
+
+`mvn test` in `alertbot`: 42 tests. `AlertPolicyTest` covers every change in the table above,
+and the threshold's parsing. `StageChangedTest` covers each invalid event. `SocialFeedTest`
+covers a real local webhook receiving the post, a webhook answering 500, an unreachable one,
+and the 50-post cap. `StageSubscriberTest` runs against an in-process ActiveMQ broker: an
+event reaches the bot; one published while it was disconnected never does; unreadable and
+invalid events are skipped and the next valid one still arrives; a failure while posting
+doesn't end the subscription.
+
+### Verified end-to-end
+
+All five services were run from their own folders against the broker from
+[`common/docker-compose.yml`](common/docker-compose.yml), with the broker's statistics read
+through its Jolokia API:
+
+| Scenario | Result |
+|---|---|
+| Durban (by alias H-506) 0 → 1 → 2 | nothing posted; logged "not news at threshold 4" |
+| Johannesburg (by alias H-504) 0 → 2, then 2 → 5 | nothing, then `DELAY ALERT … delay stage 5 of 8` |
+| Johannesburg 5 → 6 → 5 → 8 → 5 → 2 | `UPDATE` (worse), nothing (easing), `SUSPENDED`, `UPDATE` (resumed, still delayed), `RESOLVED`: five posts in all |
+| alertbot down while Durban went to 6 | the topic showed 1 consumer, not 2; after restart nothing was posted late, while transit-service had caught up to stage 6 (durable) |
+| the next change after that (Durban 6 → 7) | posted: alertbot was back on the topic |
+| broker restarted | alertbot's `failover:` connection reconnected on its own; the next change was posted |
+| `not json`, a stage of 42, and a missing `previousStage`, put straight on the topic | each logged and dropped; nothing posted |
+| `ALERTBOT_WEBHOOK_URL` pointing at a local receiver | it received `{"text":"SUSPENDED: …"}`; the post recorded `webhook 200` |
+| that receiver stopped | the next post recorded `webhook failed: ConnectException`; alertbot carried on |
+| a second alertbot started while the port was in use | exited with code 1, having made no subscription |
+| `ALERT_THRESHOLD=9` | exited with code 1: "ALERT_THRESHOLD must be a whole number from 1 to 8, not '9'" |
 
 ## Dependencies and known vulnerabilities
 
