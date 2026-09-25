@@ -64,9 +64,8 @@ watching the topic in the web console.
   (`POST /delay-stage/{hubId}`), before recording it.
 - Done: `transit-service` subscribes durably and answers ETAs from the events, replacing its
   direct call to `delay-stage-service` (`STAGE_SOURCE=rest` puts the call back).
-- Not yet: `alertbot` (stretch goal) needs its own subscriber logic — its `pom.xml`
-  already has the `activemq-client` dependency alongside the other participating
-  services.
+- Done: `alertbot` subscribes non-durably and posts a simulated alert when a hub crosses
+  `ALERT_THRESHOLD` (default 4); `GET /posts` on port 7054 shows what it posted.
 
 Message body (JSON text message, persistent):
 
